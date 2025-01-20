@@ -307,6 +307,9 @@ def gradio_app() -> gr.Blocks:
             inputs=[meme_seed_input, openai_key_input],
             outputs=[img1, img2, img3, img4],
         )
+        
+        gr.Markdown("---")
+        gr.Markdown("Created by [Daniel Herman](https://www.hermandaniel.com), check out the code [detrin/meme-generator](https://github.com/detrin/meme-generator).")
 
     return app
 
