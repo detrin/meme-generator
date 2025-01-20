@@ -1,4 +1,3 @@
-import json
 import gradio as gr
 from openai import OpenAI
 import os
@@ -6,16 +5,23 @@ import requests
 from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
-import logging
 from datetime import datetime
 import os.path
+from typing import Optional
+from pydantic import BaseModel
 
-openai_api_key = os.getenv("OPENAI_API_KEY")
-client = OpenAI(api_key=openai_api_key)
+# We no longer use a global environment variable.
+# The user will supply the key in the UI.
 
 
-def get_meme(meme_seed):
-    response = client.chat.completions.create(
+class MemeData(BaseModel):
+    image_prompt: str
+    top_text: str
+    bottom_text: Optional[str] = None
+
+
+def get_meme(meme_seed: str, client) -> MemeData:
+    response = client.beta.chat.completions.parse(
         model="gpt-4o",
         messages=[
             {
@@ -24,42 +30,22 @@ def get_meme(meme_seed):
             },
             {
                 "role": "user",
-                "content": f"Generate me a meme prompt for text2image generation (image_prompt) and the top text (top_text) and bottom text if you want to also include the bottom text (bottom_text). The meme will be based on the following: {meme_seed}",
+                "content": (
+                    "Generate me a meme prompt for text2image generation "
+                    "(image_prompt) and the top text (top_text) and bottom text "
+                    "if you want to also include the bottom text (bottom_text). "
+                    f"The meme will be based on the following: {meme_seed}"
+                ),
             },
         ],
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "email_schema",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "image_prompt": {
-                            "description": "meme prompt for text2image generation using Dalle 3",
-                            "type": "string",
-                        },
-                        "top_text": {
-                            "description": "top text that will be added to the meme",
-                            "type": "string",
-                        },
-                        "bottom_text": {
-                            "description": "bottom optional text that will be added to bottom of the meme",
-                            "type": "string",
-                        },
-                    },
-                    "additionalProperties": False,
-                    "required": ["image_prompt", "top_text"],
-                },
-            },
-        },
+        response_format=MemeData,
     )
 
-    response_content = response.choices[0].message.content
-    parsed_content = json.loads(response_content)
-    return parsed_content
+    meme = response.choices[0].message.parsed
+    return meme
 
 
-def generate_image(image_prompt):
+def generate_image(image_prompt, client):
     response = client.images.generate(
         model="dall-e-3",
         prompt=image_prompt,
@@ -142,31 +128,35 @@ def generate_meme(image_url, top_text, bottom_text):
         return image
 
 
-def process_single_meme(meme_seed):
-    meme_data = get_meme(meme_seed)
-    image_prompt = meme_data["image_prompt"]
-    top_text = meme_data["top_text"]
-    bottom_text = meme_data.get("bottom_text", "")
-    image_url = generate_image(image_prompt)
+def process_single_meme(meme_seed, client):
+    meme_data = get_meme(meme_seed, client)
+    image_prompt = meme_data.image_prompt
+    top_text = meme_data.top_text
+    bottom_text = meme_data.bottom_text
+    image_url = generate_image(image_prompt, client)
     image = generate_meme(image_url, top_text, bottom_text)
 
-    # Save image
+    # Save image (currently commented out in your original code)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S%f")
-    image_path = f"data/meme_{timestamp}.png"
-    os.makedirs(os.path.dirname(image_path), exist_ok=True)
+    # image_path = "data/tmp.png"
+    # os.makedirs(os.path.dirname(image_path), exist_ok=True)
     # image.save(image_path)
 
-    # Log details
     print(
-        f"timestamp: {timestamp}, Meme Seed: {meme_seed}, Image Prompt: {image_prompt}, Top Text: {top_text}, Bottom Text: {bottom_text}, Image Path: {image_path}"
+        f"timestamp: {timestamp}, Meme Seed: {meme_seed}, "
+        f"Image Prompt: {image_prompt}, Top Text: {top_text}, "
+        f"Bottom Text: {bottom_text}"
     )
-
     return image_prompt, top_text, bottom_text, image
 
 
-def process_multiple_memes(meme_seed):
+def process_multiple_memes(meme_seed, api_key):
+    # Create the client once, reuse it for all memes
+    client = OpenAI(api_key=api_key)
     with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = [executor.submit(process_single_meme, meme_seed) for _ in range(4)]
+        futures = [
+            executor.submit(process_single_meme, meme_seed, client) for _ in range(4)
+        ]
         results = [future.result() for future in futures]
     return results
 
@@ -174,6 +164,14 @@ def process_multiple_memes(meme_seed):
 def gradio_app():
     with gr.Blocks() as app:
         gr.Markdown("## Meme Generator")
+
+        # Added API Key field as a password input
+        openai_key_input = gr.Textbox(
+            label="OpenAI API Key",
+            placeholder="Enter your API key",
+            type="password",
+        )
+
         with gr.Row():
             with gr.Column(scale=1):
                 meme_seed_input = gr.Textbox(
@@ -191,19 +189,23 @@ def gradio_app():
                     img3 = gr.Image(label="Image 3")
                     img4 = gr.Image(label="Image 4")
 
-        def display_memes(meme_seed):
-            results = process_multiple_memes(meme_seed)
+        def display_memes(meme_seed, api_key):
+            results = process_multiple_memes(meme_seed, api_key)
+            # The function returns 4 images in a list
             memes_data = []
             for image_prompt, top_text, bottom_text, image in results:
                 memes_data.append(image)
-
             return memes_data
 
         generate_button.click(
-            fn=display_memes, inputs=[meme_seed_input], outputs=[img1, img2, img3, img4]
+            fn=display_memes,
+            inputs=[meme_seed_input, openai_key_input],
+            outputs=[img1, img2, img3, img4],
         )
+
     return app
 
 
-app = gradio_app()
-app.launch(debug=True)
+if __name__ == "__main__":
+    app = gradio_app()
+    app.launch(debug=True)
